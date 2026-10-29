@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Wrapper that calls verify-claim.py
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "$SCRIPT_DIR/verify-claim.py" "$@"
