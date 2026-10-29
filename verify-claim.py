@@ -8,7 +8,7 @@ Usage:
   verify-claim deploy --url <url> [--expect-status <code>] [--expect-body-sha256 <hash>]
   verify-claim build --artifact <path>
 
-Flags:
+Global flags (work before or after the subcommand):
   --audit       Kai-side mode: stricter checks, verbose evidence
   --format json Machine-readable JSON output
   -q, --quiet   Silent mode: exit code only
@@ -25,15 +25,10 @@ import os
 import subprocess
 import sys
 import hashlib
-import shutil
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 
-VERSION = "0.1.0"
-
-
-def json_escape(s):
-    return json.dumps(s)
+VERSION = "0.1.1"
 
 
 def emit_json(status, claim_type, evidence):
@@ -84,7 +79,6 @@ def verify_commit(args, quiet, fmt, audit):
             emit_json("FAIL", "commit", {"sha": sha, "branch": branch, "repo": repo, "error": "Not a git repository"})
         return 1
 
-    # Get remote URL
     result = subprocess.run(
         ["git", "remote", "get-url", "origin"],
         cwd=repo, capture_output=True, text=True, timeout=30
@@ -98,7 +92,6 @@ def verify_commit(args, quiet, fmt, audit):
     remote_url = result.stdout.strip()
     log_detail(f"Remote URL: {remote_url}", quiet, fmt)
 
-    # Run git ls-remote
     ref = f"refs/heads/{branch}"
     log_detail(f"Running: git ls-remote origin {ref}", quiet, fmt)
 
@@ -173,7 +166,6 @@ def verify_file(args, quiet, fmt):
             emit_json("FAIL", "file", {"path": path, "exists": False, "error": "File not found"})
         return 1
 
-    # Calculate SHA256
     sha256_hash = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(4096), b""):
@@ -222,7 +214,7 @@ def verify_deploy(args, quiet, fmt):
         req = Request(url, method="HEAD")
         resp = urlopen(req, timeout=10)
         http_status = resp.status
-    except URLError as e:
+    except URLError:
         http_status = 0
     except Exception:
         http_status = 0
@@ -295,57 +287,80 @@ def verify_build(args, quiet, fmt):
 
 
 def main():
+    # Reorder argv so global flags always come before the subcommand.
+    # This lets users write:
+    #   verify-claim commit --sha X --branch Y --format json
+    #   verify-claim --format json commit --sha X --branch Y
+    # Both work identically.
+    global_flag_names = {"--format", "-q", "--quiet", "--audit"}
+    # Global flags that consume one argument
+    global_flag_takes_arg = {"--format"}
+    argv = sys.argv[1:]
+    global_flags = []
+    sub_args = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in global_flag_names:
+            global_flags.append(arg)
+            if arg in global_flag_takes_arg and i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                i += 1
+                global_flags.append(argv[i])
+        else:
+            sub_args.append(arg)
+        i += 1
+
+    reordered = global_flags + sub_args
+
     parser = argparse.ArgumentParser(
-        description="Agent claim verification tool",
+        description="Agent claim verification tool v{}".format(VERSION),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog="""\
 Examples:
-  verify-claim commit --sha abc123 --branch feature-x --repo /path/to/repo
+  verify-claim --format json commit --sha abc123 --branch feature-x --repo /path/to/repo
+  verify-claim commit --sha abc123 --branch feature-x --format json
   verify-claim file --path /path/to/file --sha256 d41d8cd98f...
   verify-claim deploy --url https://example.com --expect-status 200
   verify-claim build --artifact ./dist/bundle.js
-        """,
+
+Note: 'verify-claim commit' requires git auth (Buzz relay git server)
+or a local clone with 'origin' fetch access configured.
+""",
     )
-    parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
+    parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format (default: text)")
     parser.add_argument("-q", "--quiet", action="store_true", help="Silent mode: exit code only")
-    parser.add_argument("--audit", action="store_true", help="Kai-side mode: stricter checks, verbose evidence")
+    parser.add_argument("--audit", action="store_true", help="Kai-side mode: deeper checks (fetch + ancestry)")
 
     subparsers = parser.add_subparsers(dest="claim_type", help="Claim type to verify")
     subparsers.required = True
 
-    # Commit
-    p_commit = subparsers.add_parser("commit", help="Verify a commit exists on origin")
+    p_commit = subparsers.add_parser("commit", help="Verify a commit exists on origin remote")
     p_commit.add_argument("--sha", required=True, help="Claimed commit SHA")
     p_commit.add_argument("--branch", required=True, help="Branch name")
     p_commit.add_argument("--repo", default=".", help="Path to git repository (default: cwd)")
 
-    # File
     p_file = subparsers.add_parser("file", help="Verify a file exists")
     p_file.add_argument("--path", required=True, help="File path")
     p_file.add_argument("--sha256", help="Expected SHA256 checksum")
 
-    # Deploy
     p_deploy = subparsers.add_parser("deploy", help="Verify a deployment URL")
     p_deploy.add_argument("--url", required=True, help="Deployment URL")
-    p_deploy.add_argument("--expect-status", type=int, default=200, help="Expected HTTP status code")
+    p_deploy.add_argument("--expect-status", type=int, default=200, help="Expected HTTP status code (default: 200)")
     p_deploy.add_argument("--expect-body-sha256", help="Expected body SHA256 checksum")
 
-    # Build
     p_build = subparsers.add_parser("build", help="Verify a build artifact exists")
     p_build.add_argument("--artifact", required=True, help="Path to build artifact")
 
-    args = parser.parse_args()
-    quiet = args.quiet
-    fmt = args.format
+    args = parser.parse_args(reordered)
 
     if args.claim_type == "commit":
-        sys.exit(verify_commit(args, quiet, fmt, args.audit))
+        sys.exit(verify_commit(args, args.quiet, args.format, args.audit))
     elif args.claim_type == "file":
-        sys.exit(verify_file(args, quiet, fmt))
+        sys.exit(verify_file(args, args.quiet, args.format))
     elif args.claim_type == "deploy":
-        sys.exit(verify_deploy(args, quiet, fmt))
+        sys.exit(verify_deploy(args, args.quiet, args.format))
     elif args.claim_type == "build":
-        sys.exit(verify_build(args, quiet, fmt))
+        sys.exit(verify_build(args, args.quiet, args.format))
 
 
 if __name__ == "__main__":
