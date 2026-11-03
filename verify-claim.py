@@ -72,8 +72,16 @@ def verify_commit(args, quiet, fmt, audit):
 
     log_info(f"Verifying commit {sha} on branch '{branch}' in repo '{repo}'", quiet, fmt)
 
-    git_dir = os.path.join(repo, ".git")
-    if not os.path.isdir(git_dir):
+    # --git-dir, not a ".git" directory check: a linked worktree has a ".git"
+    # *file* pointing at <repo>/.git/worktrees/<name>, so os.path.isdir() rejects a
+    # perfectly valid repository. The result is a probe only (returncode) and is
+    # never used as a path, so --git-dir is correct here. If a later change starts
+    # building refs/objects paths from it, switch to --git-common-dir.
+    probe = subprocess.run(
+        ["git", "rev-parse", "--git-dir"],
+        cwd=repo, capture_output=True, text=True, timeout=30
+    )
+    if probe.returncode != 0:
         log_fail(f"Not a git repository: {repo}", quiet, fmt)
         if fmt == "json":
             emit_json("FAIL", "commit", {"sha": sha, "branch": branch, "repo": repo, "error": "Not a git repository"})
